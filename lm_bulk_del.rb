@@ -6,7 +6,6 @@ require 'highline/import'
 require 'optparse'
 require 'af_hostcfg'
 
-
 class Response
   def self.setup(gid)
     @user = ask("LM User:  ")
@@ -17,7 +16,6 @@ class Response
     @existing_hosts = Array.new
     @lm_hosts = Array.new
     @errmsg = nil
-    @gid = gid
   end
 
   def self.get_response
@@ -69,16 +67,18 @@ class Response
   end
 
 
-  def self.find_host(add,delete,print,host_list)
-    if delete || add
-      get_hosts(false)
+  def self.find_host(delete,print,host_list)
+    if delete
+      print = false
+      get_hosts(url,print)
+      print = true
     else
-      get_hosts(true)
+      get_hosts(print)
     end
 
     @lm_hosts.each_index { |hash|
       name = @lm_hosts[hash]['name']
-      @found_hosts << @lm_hosts[hash] if host_list.index{|x| x[:dname].match /\b^#{name}\b/}
+      @found_hosts << @lm_hosts[hash] if host_list.index{|x| x.match /\b^#{name}\b/}
     }
 
     if !delete && @found_hosts.any?
@@ -115,7 +115,7 @@ class Response
           print "#{n['id']}".ljust(7),"#{n['name']}".ljust(39),"#{n['hostname']}".ljust(39),lname.ljust(39),slice
           puts
         else
-          @existing_hosts << { :lname => lname,:id => n['id'],:hname => n['hostname'],:dname => n['name']}
+          @existing_hosts << { :lname => lname,:id => n['id'],:hn => n['hostname']}
         end
 
       }
@@ -130,74 +130,37 @@ class Response
 
   def self.delete_hosts
     @found_hosts.each {|fh|
-      @url ="https://appfolio.logicmonitor.com/santaba/rpc/deleteHost?c=appfolio&u=#{@user}&p=#{@password}&hostId=#{fh['id']}&deleteFromSystem=true&hostGroupId=#{@gid}"
-      get_response
+      url ="https://appfolio.logicmonitor.com/santaba/rpc/deleteHost?c=appfolio&u=#{$user}&p=#{$password}&hostId=#{fh['id']}&deleteFromSystem=true&hostGroupId=#{$gid}"
+      get_response(url)
       if @errmsg == "OK"
         puts "Successfully deleted #{fh['name']}"
       else
-        puts "Error deleting #{fh['name']}, status #{@errmsg}"
+        puts "Error deleting #{fh['name']}, status #{errmsg}"
       end
     }
 
   end
 
-  def self.add_hosts(host_list,aid)
+  def self.add_hosts(host_list)
     @addme = Array.new
-    @dont_add = Array.new
-    find_host(true,false,false,host_list)
+    find_host(false,false,host_list)
 
     unless @existing_hosts.empty?
       @existing_hosts.each { |h|
-        if host_list.index { |i| i[:dname].match /\b^#{h[:dname]}\b/ } || host_list.index { |i| i[:dname].match /\b^#{h[:hname]}\b/ }
-          @dont_add << { :hname => h[:hname],:dname => h[:dname] }
-
+        if host_list.index { |x| x.match /\b^#{h[:name]}\b/ } || host_list.index { |x| x.match /\b^#{h[:hn]}\b/ }
+        puts "#{h[:hn]} already exists"
         else
-            @addme << {:hname => h[:hname], :dname => h[:dname]}
+          @addme << h[:hn]
         end
       }
 
-    host_list.each_index { |index|
-      name = @dont_add[index][:dname]
-      if host_list.index{|x| x[:dname].match /\b^#{name}\b/}
-        host_list.delete_at(index)
-        puts "#{name} already exists!"
-      end
-    }
-
-      if host_list.empty?
-        puts "No hosts added!"
-        exit 1
-      end
+      puts @addme
     end
 
-    host_list.each {|h|
-      lname = AFHostcfg.lookup_host(h[:hname])
-      lname = AFHostcfg.lookup_host(h[:dname]) if lname.nil?
-      if lname.nil?
-        dname = h[:dname]
-      else
-        dname = lname.l_fqdn
-      end
 
-      @url = "https://appfolio.logicmonitor.com/santaba/rpc/addHost?c=appfolio&u=#{@user}&p=#{@password}&hostName=#{h[:hname]}&displayedAs=#{dname}&alertEnable=true&agentId=#{aid}&hostGroupIds=#{@gid}"
-      get_response
-      if @errmsg == "OK"
-        puts "Successfully added #{h[:hname]} as #{dname}"
-      else
-        puts "Error adding #{h[:hname]}, status #{@errmsg}"
-      end
-    }
+  addurl = "https://accountName.logicmonitor.com/santaba/rpc/addHost?c=accountName&u=#{@user}&p=#{@password}&hostName=uniqueHostName&displayedAs=displayName&description=optionalDescription&alertEnable=true&agentId=agentIdNum&propName0=hostPropName0&propValue0=hostPropValue0&propName1=hostPropName1&propValue1=hostPropValue1&hostGroupIds=hostGroupId1,hostGroupId2"
 
 
-
-  end
-
-  def self.print_aid
-    @url = "https://appfolio.logicmonitor.com/santaba/rpc/getAgents?c=appfolio&u=#{@user}&p=#{@password}"
-    get_response
-    puts "Please provide a collector ID number with -c ID"
-    @output.each {|o| puts "#{o['id']} - #{o['description']}"
-    }
   end
 
 end
@@ -232,11 +195,6 @@ def parse(args)
     opts.on("-a", "--add", "Add to Logicmonitor") do |a|
       options[:add] = true
     end
-
-    options[:aid] = nil
-    opts.on("-c ID","--collector ID","Collector ID number. Required for host add.") do |c|
-      options[:aid] = c
-    end
   }
   if args == "bad"
     puts opt_parser
@@ -261,12 +219,7 @@ host_list = Array.new
 delete = false
 add = false
 if options[:hostfile] != nil
-  File.open(options[:hostfile]) do |line|
-    line.each do |l|
-      displayname,hostname = l.chomp.split("\t")
-      host_list << {:dname => displayname,:hname => hostname }
-    end
-  end
+  host_list = IO.readlines(options[:hostfile])
 end
 
 case
@@ -287,13 +240,10 @@ case
 
   when options[:delete] && options[:group] !=0 && !options[:hostfile].nil?
     delete = true
-    Response.find_host(add,delete,print,host_list)
+    Response.find_host(delete,print,host_list)
 
-  when options[:add] && options[:group] !=0 && !options[:hostfile].nil? && !options[:aid].nil?
-    Response.add_hosts(host_list,options[:aid])
-
-  when options[:add] && options[:group] !=0 && !options[:hostfile].nil? && options[:aid].nil?
-    Response.print_aid
+  when options[:add] && options[:group] !=0 && !options[:hostfile].nil?
+    Response.add_hosts(host_list)
   else
     parse("bad")
 end
