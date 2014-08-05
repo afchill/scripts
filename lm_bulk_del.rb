@@ -14,6 +14,7 @@ class Response
     @url = "https://appfolio.logicmonitor.com/santaba/rpc/getHosts?hostGroupId=#{gid}&c=appfolio&u=#{@user}&p=#{@password}"
     @output = Array.new
     @found_hosts = Array.new
+    @missing_hosts = Array.new
     @existing_hosts = Array.new
     @lm_hosts = Array.new
     @errmsg = nil
@@ -70,16 +71,24 @@ class Response
 
 
   def self.find_host(add,delete,print,host_list)
-    if delete || add
-      get_hosts(false)
-    else
-      get_hosts(true)
-    end
+    get_hosts(false)
+
 
     @lm_hosts.each_index { |hash|
       name = @lm_hosts[hash]['name']
-      @found_hosts << @lm_hosts[hash] if host_list.index{|x| x[:dname].match /\b^#{name}\b/}
+      hname = @lm_hosts[hash]['hostname']
+      if host_list.index{|x| x[:dname].match /\b^#{name}\b/} || host_list.index{|x| x[:dname].match /\b^#{hname}\b/}
+        @found_hosts << @lm_hosts[hash]
+      end
     }
+
+    host_list.each_index {|h|
+      name = host_list[h][:dname]
+      unless @found_hosts.index{|f| name.match /\b^#{f['name']}\b/ } || @found_hosts.index{|f| name.match /\b^#{f['hostname']}\b/ }
+        @missing_hosts << host_list[h]
+      end
+    }
+
 
     if !delete && @found_hosts.any?
       if print
@@ -117,12 +126,20 @@ class Response
         else
           @existing_hosts << { :lname => lname,:id => n['id'],:hname => n['hostname'],:dname => n['name']}
         end
-
       }
-    elsif !@found_hosts.any? && print
+
+      if @missing_hosts.any? && print
+        puts
+        puts "Hosts not in Logicmonitor:"
+        @missing_hosts.each { |m| puts m[:dname] }
+      end
+
+    elsif !@found_hosts.any? && !add
+      puts add
+      puts @found_hosts
       puts "Hosts not found in Logicmonitor!"
       exit 1
-    else
+    elsif @found_hosts.any? && delete
       delete_hosts
     end
     nil
@@ -132,6 +149,8 @@ class Response
     @found_hosts.each {|fh|
       @url ="https://appfolio.logicmonitor.com/santaba/rpc/deleteHost?c=appfolio&u=#{@user}&p=#{@password}&hostId=#{fh['id']}&deleteFromSystem=true&hostGroupId=#{@gid}"
       get_response
+      puts "Deleting #{fh['name']}..."
+      puts @errmsg
       if @errmsg == "OK"
         puts "Successfully deleted #{fh['name']}"
       else
@@ -157,8 +176,8 @@ class Response
       }
 
     host_list.each_index { |index|
-      name = @dont_add[index][:dname]
-      if host_list.index{|x| x[:dname].match /\b^#{name}\b/}
+      name = host_list[index][:dname]
+      if @dont_add.index{|x| x[:dname].match /\b^#{name}\b/}
         host_list.delete_at(index)
         puts "#{name} already exists!"
       end
@@ -168,27 +187,31 @@ class Response
         puts "No hosts added!"
         exit 1
       end
+
     end
 
     host_list.each {|h|
-      lname = AFHostcfg.lookup_host(h[:hname])
-      lname = AFHostcfg.lookup_host(h[:dname]) if lname.nil?
-      if lname.nil?
+      afname = AFHostcfg.lookup_host(h[:dname])
+      afname = AFHostcfg.lookup_host(h[:hname]) if afname.nil? && !h[:hname].nil?
+      if afname.nil?
         dname = h[:dname]
+        hname = h[:hname]
+        if hname.nil?
+          hname = dname
+        end
       else
-        dname = lname.l_fqdn
+        dname = afname.l_fqdn
+        hname = afname.p_fqdn
       end
 
-      @url = "https://appfolio.logicmonitor.com/santaba/rpc/addHost?c=appfolio&u=#{@user}&p=#{@password}&hostName=#{h[:hname]}&displayedAs=#{dname}&alertEnable=true&agentId=#{aid}&hostGroupIds=#{@gid}"
+      @url = "https://appfolio.logicmonitor.com/santaba/rpc/addHost?c=appfolio&u=#{@user}&p=#{@password}&hostName=#{hname}&displayedAs=#{dname}&alertEnable=true&agentId=#{aid}&hostGroupIds=#{@gid}"
       get_response
       if @errmsg == "OK"
-        puts "Successfully added #{h[:hname]} as #{dname}"
+        puts "Successfully added #{h[:dname]} as #{dname}"
       else
-        puts "Error adding #{h[:hname]}, status #{@errmsg}"
+        puts "Error adding #{h[:dname]} as #{dname}, status #{@errmsg}"
       end
     }
-
-
 
   end
 
@@ -237,6 +260,11 @@ def parse(args)
     opts.on("-c ID","--collector ID","Collector ID number. Required for host add.") do |c|
       options[:aid] = c
     end
+
+    options[:help] = false
+    opts.on("-h","--help","Print this help message") do |h|
+      options[:help] = h
+    end
   }
   if args == "bad"
     puts opt_parser
@@ -269,6 +297,7 @@ if options[:hostfile] != nil
   end
 end
 
+puts options
 case
   when options[:group] == 0 && ARGV.empty?
     puts "#No/incorrect group ID given. Printing groups."
@@ -282,8 +311,9 @@ case
 
   when options[:group] !=0 && options[:hostfile] != nil && !options[:delete] && !options[:add]
     print = true
+    delete = false
     puts 'Printing hosts found. Specify -d to delete'
-    Response.find_host(delete,print,add,host_list)
+    Response.find_host(add,delete,print,host_list)
 
   when options[:delete] && options[:group] !=0 && !options[:hostfile].nil?
     delete = true
@@ -294,6 +324,9 @@ case
 
   when options[:add] && options[:group] !=0 && !options[:hostfile].nil? && options[:aid].nil?
     Response.print_aid
+
+  when options[:help]
+    parse("bad")
   else
     parse("bad")
 end
