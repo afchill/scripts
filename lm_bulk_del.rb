@@ -6,7 +6,6 @@ require 'highline/import'
 require 'optparse'
 require 'af_hostcfg'
 
-
 class Response
   def self.setup(gid)
     @user = ask("LM User:  ")
@@ -19,6 +18,7 @@ class Response
     @lm_hosts = Array.new
     @errmsg = nil
     @gid = gid
+    @dont_add = Array.new
   end
 
   def self.get_response
@@ -72,33 +72,56 @@ class Response
 
   def self.find_host(add,delete,print,host_list)
     get_hosts(false)
+    @host_list = host_list
 
+    if add
+      @host_list.each_index {|hash|
+        dname = @host_list[hash][:dname]
+        hname = @host_list[hash][:hname]
+        afname = AFHostcfg.lookup_host(dname)
+        afname = AFHostcfg.lookup_host(hname) if afname.nil? && !hname.nil?
+
+        unless afname.nil?
+          if @lm_hosts.index{|x| x['name'].match /\b^#{afname.l_fqdn}\b/}
+            @dont_add << {:dname => afname.l_fqdn, :hname => afname.p_fqdn}
+            @existing_hosts << {:dname => afname.l_fqdn, :hname => afname.p_fqdn}
+          end
+        end
+      }
+    end
 
     @lm_hosts.each_index { |hash|
       name = @lm_hosts[hash]['name']
       hname = @lm_hosts[hash]['hostname']
-      if host_list.index{|x| x[:dname].match /\b^#{name}\b/} || host_list.index{|x| x[:dname].match /\b^#{hname}\b/}
-        @found_hosts << @lm_hosts[hash]
+      pname = AFHostcfg.lookup_host(name)
+      pname = AFHostcfg.lookup_host(hname) if pname.nil?
+      if @host_list.index{|x| x[:dname].match /\b^#{name}/}
+        @found_hosts << {:id => @lm_hosts[hash]['id'], :name => name, :hname => hname, :searched => name}
+      elsif @host_list.index{|x| x[:dname].match /\b^#{hname}/}
+        @found_hosts << {:id => @lm_hosts[hash]['id'], :name => name, :hname => hname, :searched => hname}
+      elsif !pname.nil? && @host_list.index{|x| x[:dname].match /\b^#{pname.p_fqdn}/}
+        @found_hosts << {:id => @lm_hosts[hash]['id'], :name => name, :hname => hname, :searched => pname.p_fqdn}
       end
     }
 
-    host_list.each_index {|h|
-      name = host_list[h][:dname]
+
+    @host_list.each_index {|h|
+      name = @host_list[h][:dname]
       unless @found_hosts.index{|f| name.match /\b^#{f['name']}\b/ } || @found_hosts.index{|f| name.match /\b^#{f['hostname']}\b/ }
-        @missing_hosts << host_list[h]
+        @missing_hosts << @host_list[h]
       end
     }
 
 
     if !delete && @found_hosts.any?
       if print
-        print "#ID".ljust(7),"Name".ljust(39),"Hostname".ljust(39),"Logical Name".ljust(39),"Slice Name"
+        print "#ID".ljust(7),"Name".ljust(39),"Hostname".ljust(39),"Logical Name".ljust(39),"Slice Name".ljust(20),"Searched For"
         puts
       end
 
       @found_hosts.each { |n|
-        nlookup = AFHostcfg.lookup_host(n['name'])
-        hnlookup = AFHostcfg.lookup_host(n['hostname'])
+        nlookup = AFHostcfg.lookup_host(n[:name])
+        hnlookup = AFHostcfg.lookup_host(n[:hname])
         slice = ""
         lname = ""
         if nlookup.nil? && hnlookup.nil?
@@ -121,7 +144,7 @@ class Response
         end
 
         if print
-          print "#{n['id']}".ljust(7),"#{n['name']}".ljust(39),"#{n['hostname']}".ljust(39),lname.ljust(39),slice
+          print "#{n[:id]}".ljust(7),"#{n[:name]}".ljust(39),"#{n[:hname]}".ljust(39),lname.ljust(39),slice.ljust(20),"#{n[:searched]}"
           puts
         else
           @existing_hosts << { :lname => lname,:id => n['id'],:hname => n['hostname'],:dname => n['name']}
@@ -160,14 +183,13 @@ class Response
 
   end
 
-  def self.add_hosts(host_list,aid)
+  def self.add_hosts(aid,host_list)
     @addme = Array.new
-    @dont_add = Array.new
     find_host(true,false,false,host_list)
 
     unless @existing_hosts.empty?
       @existing_hosts.each { |h|
-        if host_list.index { |i| i[:dname].match /\b^#{h[:dname]}\b/ } || host_list.index { |i| i[:dname].match /\b^#{h[:hname]}\b/ }
+        if @host_list.index { |i| i[:dname].match /\b^#{h[:dname]}\b/ } || @host_list.index { |i| i[:dname].match /\b^#{h[:hname]}\b/ }
           @dont_add << { :hname => h[:hname],:dname => h[:dname] }
 
         else
@@ -175,22 +197,23 @@ class Response
         end
       }
 
-    host_list.each_index { |index|
-      name = host_list[index][:dname]
-      if @dont_add.index{|x| x[:dname].match /\b^#{name}\b/}
-        host_list.delete_at(index)
-        puts "#{name} already exists!"
+    @host_list.each_index { |index|
+      dname = @host_list[index][:dname]
+      if @dont_add.index{|x| x[:hname].match /\b^#{dname}\b/} || @dont_add.index{|x| x[:dname].match /\b^#{dname}\b/}
+        @host_list.reject!{|r|
+          puts "#{r[:dname]} already exists!"
+          r == @host_list[index]}
       end
     }
 
-      if host_list.empty?
+      if @host_list.empty?
         puts "No hosts added!"
         exit 1
       end
 
     end
 
-    host_list.each {|h|
+    @host_list.each {|h|
       afname = AFHostcfg.lookup_host(h[:dname])
       afname = AFHostcfg.lookup_host(h[:hname]) if afname.nil? && !h[:hname].nil?
       if afname.nil?
@@ -275,7 +298,7 @@ def parse(args)
   end
 end
 
-if !ARGV.empty? && ARGV[0].match('^-.')
+if !ARGV.empty? && ARGV[0].match('^-.') && !ARGV[0].match('^-h') && !ARGV[0].match('^--help')
   options = parse(ARGV)
 elsif ARGV.empty?
     options = parse(ARGV)
@@ -297,19 +320,18 @@ if options[:hostfile] != nil
   end
 end
 
-puts options
 case
-  when options[:group] == 0 && ARGV.empty?
+  when options[:group] == 0 && ARGV.empty? && !options[:help]
     puts "#No/incorrect group ID given. Printing groups."
         Response.print_groups
     exit 1
 
-  when options[:hostfile] == nil && options[:group] != 0
+  when options[:hostfile] == nil && options[:group] != 0 && !options[:help]
     print = true
     puts "#No host file given (or doesn't exist). Printing hosts in group."
     Response.get_hosts(print)
 
-  when options[:group] !=0 && options[:hostfile] != nil && !options[:delete] && !options[:add]
+  when options[:group] !=0 && options[:hostfile] != nil && !options[:delete] && !options[:add] && !options[:help]
     print = true
     delete = false
     puts 'Printing hosts found. Specify -d to delete'
@@ -320,7 +342,7 @@ case
     Response.find_host(add,delete,print,host_list)
 
   when options[:add] && options[:group] !=0 && !options[:hostfile].nil? && !options[:aid].nil?
-    Response.add_hosts(host_list,options[:aid])
+    Response.add_hosts(options[:aid],host_list)
 
   when options[:add] && options[:group] !=0 && !options[:hostfile].nil? && options[:aid].nil?
     Response.print_aid
