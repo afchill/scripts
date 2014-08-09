@@ -5,6 +5,7 @@ require 'json'
 require 'highline/import'
 require 'optparse'
 require 'af_hostcfg'
+require 'resolv'
 
 class Response
   def self.setup(gid,user,pass)
@@ -23,6 +24,7 @@ class Response
     @errmsg = nil
     @gid = gid
     @dont_add = Array.new
+    @afhost_list = AFHostcfg.lookup_hosts(nil)
   end
 
   def self.get_response
@@ -43,12 +45,46 @@ class Response
   end
 
   def self.af_lookup(hname,dname)
-    dname,ddomain = dname.chomp.split(".")
-    hname,hdomain = hname.chomp.split(".") unless hname.nil?
-    afname = AFHostcfg.lookup_host(dname)
+    @dupes = Array.new
+    if hname.nil?
+      hname = dname
+    end
+    shname,ddomain = hname.chomp.split(".")
+    sdname,ddomain = dname.chomp.split(".")
+    afhost = @afhost_list.select{|a| a.p_fqdn == hname || a.l_fqdn == hname || a.p_name == shname || a.p_name == sdname }
+    afname = afhost[0]
     afname = AFHostcfg.lookup_host(hname) if afname.nil?
 
     return afname
+  end
+
+  def self.print_header(type,count)
+      puts "#Found #{count} hosts" if type == 'LM' || type == 'search'
+      print '#'
+      unless type == 'notinlm'
+        print 'DisplayName(LM)'.ljust(38)
+        print 'Hostname(LM)'.ljust(39)
+      end
+      if type == 'LM' || type == 'search' || type == 'notinlm'
+        print 'Physical Name(AF)'.ljust(30)
+        print 'Logical Name(AF)'.ljust(34)
+        print 'Slice(AF)'.ljust(12)
+        print 'Searched For' if type == 'search'
+      end
+      puts
+
+  end
+
+  def self.print_hosts(array,search)
+    array.each { |n|
+      print n[:name].ljust(39)
+      print n[:hname].ljust(39)
+      print n[:pname].ljust(30)
+      print n[:lname].ljust(34)
+      print n[:slice].ljust(12)
+      print "#{n[:searched]}" if search
+      puts
+    }
   end
 
   def self.print_groups
@@ -87,94 +123,153 @@ class Response
         pname = "Not Found" if pname.nil?
         lname = lname.l_fqdn
       end
-      attrs = { :id => i['id'], :name => i['name'], :hostname => i['properties']['system.hostname'], :lname => lname, :pname => pname, :slice => slice}
+      attrs = { :id => i['id'], :name => i['name'], :hname => i['properties']['system.hostname'], :lname => lname, :pname => pname, :slice => slice}
       @lm_hosts << attrs
     }
+    @lm_hosts = @lm_hosts.sort_by{ |hsh| hsh[:name] }
     if print
-      puts "Found #{@lm_hosts.length} hosts"
-      print "#DisplayName(LM)".ljust(39),"Hostname(LM)".ljust(39),"Physical Name(AF)".ljust(30),"Logical Name(AF)".ljust(34),"Slice(AF)".ljust(12)
-      puts
-      @lm_hosts.each { |h|
-        print "#{h[:name]}".ljust(39),"#{h[:hostname]}".ljust(39),h[:pname].ljust(30),h[:lname].ljust(34),h[:slice]
-        puts
-      }
+      print_header('LM',@lm_hosts.length)
+      print_hosts(@lm_hosts,false)
     end
   end
 
-
-  def self.find_host(add,delete,print,host_list)
-    get_hosts(false)
+   def self.find_host(add,delete,print,host_list,compare)
+    get_hosts(false) unless compare
     @host_list = host_list
+    @af_missing = Array.new
+    @delete = Array.new
 
-   @lm_hosts.each_index { |hash|
-      dname = @lm_hosts[hash][:name]
-      hname = @lm_hosts[hash][:hostname]
-      pname = @lm_hosts[hash][:pname]
-      lname = @lm_hosts[hash][:lname]
-      slice = @lm_hosts[hash][:slice]
-      searched = nil
-      if @host_list.index{|x| x[:dname].match /\b^#{dname}/}
-        searched = dname
-      elsif @host_list.index{|x| x[:dname].match /\b^#{hname}/}
-        searched = hname
-      elsif !pname.nil? && @host_list.index{|x| x[:dname].match /\b^#{pname}/}
-        searched = pname
-      elsif !pname.nil? && @host_list.index{|x| x[:dname].match /\b^#{lname}/}
-        searched = lname
-      elsif !pname.nil? && @host_list.index{|x| x[:sname].match /\b^#{pname}|\b^#{lname}|\b^#{dname}/}
-        searched = pname
-      end
+     @lm_hosts.each_index { |hash|
+        dname = @lm_hosts[hash][:name]
+        hname = @lm_hosts[hash][:hname]
+        pname = @lm_hosts[hash][:pname]
+        lname = @lm_hosts[hash][:lname]
+        slice = @lm_hosts[hash][:slice]
+        if @host_list.index{|x| x[:dname].match /\b^#{dname}/}
+          searched = dname
+        elsif @host_list.index{|x| x[:dname].match /\b^#{hname}/} || @host_list.index{|x| x[:console].match /\b^#{hname}/}
+          searched = hname
+        elsif !pname.nil? && @host_list.index{|x| x[:dname].match /\b^#{pname}/}
+          searched = pname
+        elsif !pname.nil? && @host_list.index{|x| x[:dname].match /\b^#{lname}/}
+          searched = lname
+        elsif !pname.nil? && @host_list.index{|x| x[:sname].match /\b^#{pname}|\b^#{lname}|\b^#{dname}/}
+          searched = pname
+        else
+          searched = nil
+        end
 
-      unless searched.nil?
-      @found_hosts << {:id => @lm_hosts[hash][:id], :name => dname, :hname => hname, :searched => searched, :lname => lname, :slice => slice, :pname => pname}
-      end
-    }
-
-
-    @host_list.each_index {|h|
-      name = @host_list[h][:dname]
-      sname = @host_list[h][:sname]
-      unless @found_hosts.index{|f| name.match /^#{f[:name]}|^#{f[:hname]}|^#{f[:pname]}|^#{f[:lname]}/ } || @found_hosts.index{|f| sname.match /\b^#{f[:name]}|\b^#{f[:hname]}|\b^#{f[:pname]}|\b^#{f[:lname]}/ }
-        @missing_hosts << @host_list[h]
-      end
-    }
-
-
-    if !delete && @found_hosts.any?
-      if print
-        puts "#Founds #{@found_hosts.length} hosts"
-        print "#DisplayName(LM)".ljust(39),"Hostname(LM)".ljust(39),"Physical Name(AF)".ljust(30),"Logical Name(AF)".ljust(34),"Slice(AF)".ljust(12),"Searched For"
-        puts
-      end
-
-      @found_hosts.each { |n|
-        if print
-          #Easier to debug on multiple lines
-          print n[:name].ljust(39)
-          print n[:hname].ljust(39)
-          print n[:pname].ljust(30)
-          print n[:lname].ljust(34)
-          print n[:slice].ljust(12),"#{n[:searched]}"
-          puts
+        if searched.nil? && compare
+          @af_missing << {:id => @lm_hosts[hash][:id], :name => dname, :hname => hname, :searched => searched, :lname => lname, :slice => slice, :pname => pname}
+        elsif !searched.nil?
+          @found_hosts << {:id => @lm_hosts[hash][:id], :name => dname, :hname => hname, :searched => searched, :lname => lname, :slice => slice, :pname => pname}
         end
       }
 
-      if @missing_hosts.any? && print
-        puts
-        puts "Hosts not in Logicmonitor:"
-        @missing_hosts.each { |m| puts m[:dname] }
-      end
+      @host_list.each_index {|h|
+        name = @host_list[h][:dname]
+        sname = @host_list[h][:sname]
+        unless @found_hosts.index{|f| name.match /^#{f[:name]}|^#{f[:hname]}|^#{f[:pname]}|^#{f[:lname]}/ } || @found_hosts.index{|f| sname.match /\b^#{f[:name]}|\b^#{f[:hname]}|\b^#{f[:pname]}|\b^#{f[:lname]}/ }
+          @missing_hosts << @host_list[h]
+        end
+      }
 
-    elsif !@found_hosts.any? && !add
-      puts "Hosts not found in Logicmonitor!"
-      exit 1
-    elsif @found_hosts.any? && delete
-      delete_hosts
-    end
+      @found_hosts.each{ |found|
+        matches = @found_hosts.select{|sel| sel[:lname] == found[:lname] unless sel[:lname] == "Not Found"}
+        if matches.length > 1
+          @dupes << found
+        end
+      }
+
+      if !delete && @found_hosts.any?
+        if print
+          @found_hosts = @found_hosts.sort_by { |hsh| hsh[:name] }
+          print_header('search',@found_hosts.length)
+          print_hosts(@found_hosts,true)
+          @dupes = @dupes.sort_by { |hsh| hsh[:lname]}
+          puts
+          puts "#DUPLICATES"
+          print_header('search',@dupes.length)
+          print_hosts(@dupes,true)
+        end
+
+
+        if @missing_hosts.any? && print && !compare
+          puts
+          puts "#Hosts not in Logicmonitor:"
+          puts
+          @missing_hosts.each { |m|
+            puts m[:dname]
+          }
+          puts
+        end
+
+        if @missing_hosts.any? && compare
+          puts
+          puts "#Hosts not in Logicmonitor:"
+          print "#Physical Name(AF)".ljust(30),"Logical Name(AF)".ljust(34),"Slice(AF)".ljust(12)
+          puts
+          @missing_hosts.each { |m|
+            afname = af_lookup(m[:hname],m[:dname])
+            pname = afname.p_fqdn
+            lname = afname.l_fqdn
+            slice = afname.slice
+            slice = slice.name unless slice.nil?
+            print pname.ljust(30)
+            print lname.ljust(34)
+            if slice.nil?
+              slice = "Not Found"
+            end
+            print slice.ljust(12)
+            puts
+          }
+        end
+
+        if compare && @af_missing.any?
+          puts
+          puts "#Hosts not in hostdb"
+          print "#DisplayName(LM)".ljust(39),"Hostname(LM)".ljust(39)
+          puts
+          @af_missing.each{|m|
+            print m[:name].ljust(39)
+            print m[:hname].ljust(39)
+            puts
+          }
+        end
+
+      elsif !@found_hosts.any? && !add
+        puts "Hosts not found in Logicmonitor!"
+        exit 1
+      end
     nil
+    end
+
+  def self.compare
+    get_hosts(false)
+    af_missing = Array.new
+    af_found = Array.new
+    @afhost_list.each_index {|h|
+      name = @afhost_list[h].p_fqdn
+      console = @afhost_list[h].console
+      if console.nil?
+        console = "Not Found"
+      else
+        console = "console.#{@afhost_list[h].p_fqdn}"
+      end
+      afentry = {:hname => name, :dname => @afhost_list[h].l_fqdn, :sname => name, :console => console}
+      if @lm_hosts.index{|f| name.match /\b^#{f[:name]}|^#{f[:hname]}|^#{f[:pname]}|^#{f[:lname]}/ }
+        af_found << afentry
+        af_found = af_found.sort_by { |hsh| hsh[:name] }
+      else
+        @missing_hosts << afentry
+      end
+    }
+    find_host(false,false,true,af_found,true)
   end
 
-  def self.delete_hosts
+  def self.delete_hosts(host_list)
+    find_host(false,true,false,host_list,false)
+
     @found_hosts.each {|fh|
       @url ="https://appfolio.logicmonitor.com/santaba/rpc/deleteHost?c=appfolio&u=#{@user}&p=#{@password}&hostId=#{fh[:id]}&deleteFromSystem=true&hostGroupId=#{@gid}"
       get_response
@@ -189,12 +284,12 @@ class Response
   end
 
   def self.add_hosts(aid,host_list)
-    find_host(true,false,false,host_list)
+    find_host(true,false,false,host_list,false)
     addme = Array.new
 
     @host_list.each_index { |index|
       dname = @host_list[index][:dname]
-      if @missing_hosts.index{|x| dname.match /\b^#{x[:dname]}/}
+      if @missing_hosts.index{|x| dname.match /\b^#{x[:dname]}\b/}
         addme << @host_list[index]
       else
         puts "#{dname} already exists!"
@@ -206,7 +301,6 @@ class Response
         exit 1
       end
 
-puts addme
     addme.each {|h|
       hname = h[:hname]
       dname = h[:dname]
@@ -221,7 +315,6 @@ puts addme
         dname = afname.l_fqdn
         hname = afname.p_fqdn
       end
-
       @url = "https://appfolio.logicmonitor.com/santaba/rpc/addHost?c=appfolio&u=#{@user}&p=#{@password}&hostName=#{hname}&displayedAs=#{dname}&alertEnable=true&agentId=#{aid}&hostGroupIds=#{@gid}"
       get_response
       if @errmsg == "OK"
@@ -283,6 +376,7 @@ def parse(args)
     opts.on("-h","--help","Print this help message") do |h|
       options[:help] = h
     end
+
     options[:user] = nil
     options[:pass] = nil
     opts.on("--passwd FILE","File with colon delimited username and password.") do |b|
@@ -291,6 +385,12 @@ def parse(args)
         options[:user],options[:pass] = l.chomp.split(":")
       end
     end
+
+    options[:compare] = false
+    opts.on("--compare","Compare hostdb to LM") do |c|
+      options[:compare] = true
+    end
+
     end
   }
   if args == "bad"
@@ -319,13 +419,14 @@ host_list = Array.new
 delete = false
 add = false
 domain = AFHostcfg.net.domain
+compare = false
 if options[:hostfile] != nil
   File.open(options[:hostfile]) do |line|
     line.each do |l|
       displayname,hostname = l.chomp.split("\t")
       sname,dmname = displayname.chomp.split(".")
       sname = "#{sname}.#{AFHostcfg.net.domain}"
-      host_list << {:dname => displayname,:hname => hostname, :sname => sname }
+      host_list << {:dname => displayname,:hname => hostname, :sname => sname, :console => "N/A" }
     end
   end
 end
@@ -337,7 +438,7 @@ case
         Response.print_groups
     exit 1
 
-  when options[:hostfile] == nil && options[:group] != 0 && !options[:help]
+  when options[:hostfile] == nil && options[:group] != 0 && !options[:help] && !options[:compare]
     print = true
     puts "#No host file given (or doesn't exist). Printing hosts in LM group. Matching with #{domain}"
     Response.get_hosts(print)
@@ -346,17 +447,20 @@ case
     print = true
     delete = false
     puts "#Printing hosts found. Matching with #{domain} Specify -d to delete"
-    Response.find_host(add,delete,print,host_list)
+    Response.find_host(add,delete,print,host_list,compare)
 
   when options[:delete] && options[:group] !=0 && !options[:hostfile].nil?
-    delete = true
-    Response.find_host(add,delete,print,host_list)
+    Response.delete_hosts(host_list)
 
   when options[:add] && options[:group] !=0 && !options[:hostfile].nil? && !options[:aid].nil?
     Response.add_hosts(options[:aid],host_list)
 
   when options[:add] && options[:group] !=0 && !options[:hostfile].nil? && options[:aid].nil?
     Response.print_aid
+
+  when options[:compare] && options[:group] !=0 && options[:hostfile].nil? && options[:aid].nil? && !options[:help]
+    puts "#Comparing hosts from hostdb to LM"
+    Response.compare
 
   when options[:help]
     parse("bad")
